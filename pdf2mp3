@@ -1,0 +1,184 @@
+#!/bin/bash
+
+# pdf2mp3
+# Simply convert your PDF files into audio books
+
+# Copyright 2013-2033 Aario Shahbany
+# Distributed under the terms of the GNU General Public License v2
+
+#     This program is free software: you can redistribute it and/or modify
+#     it under the terms of the GNU General Public License as published by
+#     the Free Software Foundation, either version 3 of the License, or
+#     (at your option) any later version.
+# 
+#     This program is distributed in the hope that it will be useful,
+#     but WITHOUT ANY WARRANTY; without even the implied warranty of
+#     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#     GNU General Public License for more details.
+# 
+#     You should have received a copy of the GNU General Public License
+#     along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+# Description:
+#     This program gets a pdf file name from argument
+#     Converts it to txt using the pdftotext command
+#     Splits created .txt file based on "Form feed" character (Which pdftotext
+#      inserts after each page of converted text)
+#     Converts each .txt split file to .wav using pico2wave command
+#     Converts each .wav file to .mp3 using lame command
+#     Prompts users that the conversion finished and where he can pick files (in /tmp/pdf2mp3/)
+#     Each MP3 file has ID3 tags as below:
+#      Title:   "Page: <Page number>"
+#      Album:   "PDF Filename"
+
+# Multi-threading:
+#     Amazingly it can count number of CPU cores on your system (greping /proc/cpuinfo)
+#     And run multiple threads simultaneously (As many as number of cpu cores on the system)
+
+# Dependency:
+#     pico2wave
+#     pdftotext
+#     lame
+#     awk
+#     csplit
+
+# Run:
+#     pdf2mp3 pdf2mp3 "pdf-file-name.pdf"
+
+# Compatibility Check:
+#     I ran this script on Debian 7 Wheezy myself and it worked perfectly. Helped myself to
+#     read a world of books every day on way to work. Books which I always whished to have 
+#     time to read.
+
+# Example:
+#     $ bash ./pdf2mp3 ./History\ of\ Things.pdf
+#     Dependency check in progress...
+#     Done.
+#     Converting pdf file to text...
+#     PDF File: ./History of Things.pdf
+#     TXT File: ./History of Things.txt
+#     Spliting text file...
+#     Total 8 pages splitted.
+#     8 pages remaining...
+#     7 pages remaining...
+#     6 pages remaining...
+#     5 pages remaining...
+#     4 pages remaining...
+#     3 pages remaining...
+#     2 pages remaining...
+#     1 pages remaining...
+#     Finished.
+#     Total 8 MP3 files created in /tmp/pdf2mp3. You can go there and pick your files.
+#     Enjoy! ;)
+
+# Changelog:
+#     1.1.0:
+#      Better quality per file size of output mp3 files by choosing -q 0 -V 9 options instead of -q 2 -h
+
+# Enjoy! ;)
+
+DEPENDENCIES=('pico2wave' 'pdftotext' 'lame' 'awk' 'csplit')
+TEMPFOLDER=/tmp/pdf2mp3
+CPU_COUNT=`grep -c processor /proc/cpuinfo`
+
+convert () {
+	FIRST_FILE=`ls $TEMPFOLDER/*.txt | sort | head -1`
+	PAGE=`echo $FIRST_FILE | awk -F "_" '{print $NF'} | cut -d "." -f1`
+	WAVE=`echo $FIRST_FILE | sed -s 's/.txt/.wav/'`
+	MP3=`echo $FIRST_FILE | sed -s 's/.txt/.mp3/'`
+	echo "Converting $FIRST_FILE to $WAVE..."
+	mv $FIRST_FILE $FIRST_FILE.lock
+	pico2wave -l=es-ES -w="$WAVE" "`cat $FIRST_FILE.lock`"
+	echo "Converting $WAVE to $MP3..."
+	lame --add-id3v2 \
+		--tt "Page: $PAGE" \
+		--ta "pdf2mp3" \
+		--tl "$FILENAME" \
+		--tg 101 \
+		--tc "Converted from PDF to MP3 by pdf2mp3. www.sf.net/projects/pdf2mp3" \
+		--tn "$PAGE/$1" \
+		-q 0 \
+		-V 9 \
+		$WAVE \
+		$MP3
+	rm $FIRST_FILE.lock $WAVE
+	echo "Conversion of $FIRST_FILE finished."
+}
+
+if [ $# -eq 0 ]; then
+	echo 'syntax: pdf2mp3 "pdf-file-name.pdf"'
+	exit 1;
+fi
+
+echo "Dependency check in progress..."
+success=1
+for dep in "${DEPENDENCIES[@]}"; do
+	if [ $(which $dep | wc -l) -eq 0 ]; then echo "$dep not found!"; success=0; fi
+done
+if [ $success -ne 1 ]; then
+	echo "Not all dependencies satisfied. Please install missing items for your distro first.";
+	exit 1;
+else
+	echo Done.
+fi
+
+SOURCE=$1
+DEST=`echo "$SOURCE" | sed -s 's/.pdf/.txt/'`
+BASENAME=`basename "$SOURCE"`
+FILENAME="${BASENAME%.*}"
+
+if [ "$SOURCE" == "$DEST" ]; then
+	echo 'Invalid input extension!'
+	exit 1
+fi
+
+echo "Converting pdf file to text..."
+echo "PDF File: $SOURCE"
+echo "TXT File: $DEST"
+pdftotext "$SOURCE" "$DEST"
+if [ $? -ne 0 ];then
+	echo 'Error converting pdf file to text!'
+	exit 1
+fi
+
+echo "Spliting text file..."
+rm -rf $TEMPFOLDER
+mkdir $TEMPFOLDER
+awk '/^\x0c/{i++};{print > ("'"$TEMPFOLDER/$BASENAME""_"'"sprintf("%04d",i)".txt")}' "$DEST"
+rm "$DEST"
+SPLIT_COUNT=`ls -l $TEMPFOLDER/*.txt 2>/dev/null | wc -l`
+if [ $SPLIT_COUNT -eq 0 ]; then
+	echo "Writing split files to $TEMPFOLDER failed! Check write permissions."
+	exit 1
+else
+	echo "Total $SPLIT_COUNT pages splitted."
+fi
+
+SAVEIFS=$IFS
+IFS=$(echo -en "\n\b")
+while [ 1 ]; do
+	PICO2WAV_COUNT=`pidof pico2wave | wc -w`
+	LAME_COUNT=`pidof lame | wc -w`
+	let "THREAD_COUNT=PICO2WAV_COUNT+LAME_COUNT"
+	REMAINING=`ls -l $TEMPFOLDER/*.txt 2>/dev/null | wc -l`
+	if [ $REMAINING -eq 0 ]; then
+		break
+	fi
+	if [ $THREAD_COUNT -lt $CPU_COUNT ]; then
+		echo "$REMAINING pages remaining..."
+		convert $SPLIT_COUNT &>/dev/null &
+	fi
+	sleep 1
+done
+IFS=$SAVEIFS
+
+echo Finished.
+
+OUTPUT_COUNT=`ls -l $TEMPFOLDER/*.mp3 2>/dev/null | wc -l`
+if [ $OUTPUT_COUNT -eq 0 ]; then
+	echo "Writing mp3 files to $TEMPFOLDER failed! Check write permissions."
+	exit 1
+else
+	echo "Total $OUTPUT_COUNT MP3 files created in "'"'$TEMPFOLDER'"'". You can go there and pick your files."
+	echo "Enjoy! ;)"
+fi
